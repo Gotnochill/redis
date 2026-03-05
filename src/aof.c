@@ -21,6 +21,7 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <sys/param.h>
+#include "aof_uring.h"
 
 void freeClientArgv(client *c);
 off_t getAppendOnlyFileSize(sds filename, int *status);
@@ -1105,8 +1106,24 @@ void applyAppendOnlyConfig(void) {
  * the first call is short, there is a end-of-space condition, so the next
  * is likely to fail. However apparently in modern systems this is no longer
  * true, and in general it looks just more resilient to retry the write. If
- * there is an actual error condition we'll get it at the next try. */
+ * there is an actual error condition we'll get it at the next try.
+ * The following write function is modified with write function of io_uring for now. */
+
 ssize_t aofWrite(int fd, const char *buf, size_t len) {
+#ifdef USE_IO_URING
+    /* If io_uring is enabled and initialized, use async write */
+    if (server.aof_use_io_uring) {
+        int ret = aofWriteUring(fd, buf, len, server.aof_last_incr_size);
+        if (ret >= 0) {
+            /* Success - write submitted asynchronously */
+            return ret;
+        }
+        /* If io_uring fails, fall back to traditional write */
+        serverLog(LL_DEBUG, "Falling back to traditional write for AOF");
+    }
+#endif
+
+    /* Traditional blocking write */
     ssize_t nwritten = 0, totwritten = 0;
 
     while(len) {
@@ -1149,6 +1166,13 @@ void flushAppendOnlyFile(int force) {
     int sync_in_progress = 0;
     mstime_t latency;
 
+    #ifdef USE_IO_URING
+    if (server.aof_use_io_uring && sdslen(server.aof_buf) > 0) {
+        serverLog(LL_DEBUG, "Flushing %zu bytes using io_uring", sdslen(server.aof_buf));
+    }
+    #endif
+
+
     if (sdslen(server.aof_buf) == 0) {
         if (server.aof_last_incr_fsync_offset == server.aof_last_incr_size) {
             /* All data is fsync'd already: Update fsynced_reploff_pending just in case.
@@ -1179,6 +1203,7 @@ void flushAppendOnlyFile(int force) {
         }
         return;
     }
+
 
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
         sync_in_progress = aofFsyncInProgress();
@@ -1328,17 +1353,39 @@ try_fsync:
 
     /* Perform the fsync if needed. */
     if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
-        /* redis_fsync is defined as fdatasync() for Linux in order to avoid
-         * flushing metadata. */
         latencyStartMonitor(latency);
-        /* Let's try to get this data on the disk. To guarantee data safe when
-         * the AOF fsync policy is 'always', we should exit if failed to fsync
-         * AOF (see comment next to the exit(1) after write error above). */
-        if (redis_fsync(server.aof_fd) == -1) {
-            serverLog(LL_WARNING,"Can't persist AOF for fsync error when the "
-              "AOF fsync policy is 'always': %s. Exiting...", strerror(errno));
-            exit(1);
+        
+#ifdef USE_IO_URING
+        /* Use async fsync if io_uring is enabled */
+        if (server.aof_use_io_uring) {
+            int ret = aofFsyncUring(server.aof_fd);
+            if (ret == 0) {
+                /* Success - fsync submitted asynchronously */
+                /* Don't wait - will be processed in serverCron */
+                latencyEndMonitor(latency);
+                latencyAddSampleIfNeeded("aof-fsync-async", latency);
+                server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+                server.aof_last_fsync = server.mstime;
+                atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
+            } else {
+                /* io_uring fsync failed, fall back to traditional fsync */
+                if (redis_fsync(server.aof_fd) == -1) {
+                    serverLog(LL_WARNING,"Can't persist AOF for fsync error when the "
+                      "AOF fsync policy is 'always': %s. Exiting...", strerror(errno));
+                    exit(1);
+                }
+            }
+        } else 
+#endif
+        {
+            /* Traditional blocking fsync */
+            if (redis_fsync(server.aof_fd) == -1) {
+                serverLog(LL_WARNING,"Can't persist AOF for fsync error when the "
+                  "AOF fsync policy is 'always': %s. Exiting...", strerror(errno));
+                exit(1);
+            }
         }
+        
         latencyEndMonitor(latency);
         latencyAddSampleIfNeeded("aof-fsync-always",latency);
         server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
@@ -1352,7 +1399,9 @@ try_fsync:
         }
         server.aof_last_fsync = server.mstime;
     }
-}
+
+
+
 
 sds catAppendOnlyGenericCommand(sds dst, int argc, robj **argv) {
     char buf[32];
