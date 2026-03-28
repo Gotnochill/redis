@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Redis AOF — io_uring vs Traditional | Benchmark Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: #0a0e1a;
+    color: #e2e8f0;
+    min-height: 100vh;
+  }
+
+  /* Animated background gradient */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: 
+      radial-gradient(ellipse at 20% 50%, rgba(99,102,241,0.12) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, rgba(236,72,153,0.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 80%, rgba(34,211,238,0.06) 0%, transparent 50%);
+    z-index: -1;
+    animation: bgShift 20s ease infinite alternate;
+  }
+  @keyframes bgShift {
+    0%   { transform: scale(1) rotate(0deg); }
+    100% { transform: scale(1.1) rotate(2deg); }
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 2.5rem;
+  }
+  .header h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #818cf8, #c084fc, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.5px;
+  }
+  .header p {
+    color: #94a3b8;
+    font-size: 0.95rem;
+    font-weight: 300;
+  }
+  .header .tag {
+    display: inline-block;
+    margin-top: 0.75rem;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: rgba(99,102,241,0.15);
+    color: #a5b4fc;
+    border: 1px solid rgba(99,102,241,0.25);
+  }
+
+  /* Summary cards */
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .card {
+    background: rgba(15,23,42,0.7);
+    border: 1px solid rgba(99,102,241,0.15);
+    border-radius: 16px;
+    padding: 1.5rem;
+    backdrop-filter: blur(12px);
+    transition: transform 0.25s, border-color 0.25s;
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(99,102,241,0.4);
+  }
+  .card .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64748b;
+    margin-bottom: 0.5rem;
+  }
+  .card .value {
+    font-size: 2rem;
+    font-weight: 700;
+  }
+  .card .sub {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+  }
+  .improvement .value { color: #34d399; }
+  .trad-card .value   { color: #f87171; }
+  .uring-card .value  { color: #818cf8; }
+
+  /* Chart containers */
+  .chart-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+  @media (max-width: 768px) {
+    .chart-grid { grid-template-columns: 1fr; }
+  }
+  .chart-box {
+    background: rgba(15,23,42,0.7);
+    border: 1px solid rgba(99,102,241,0.12);
+    border-radius: 16px;
+    padding: 1.5rem;
+    backdrop-filter: blur(12px);
+  }
+  .chart-box h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: #cbd5e1;
+  }
+  .chart-box canvas {
+    width: 100% !important;
+  }
+
+  /* How it works section */
+  .how-section {
+    background: rgba(15,23,42,0.7);
+    border: 1px solid rgba(99,102,241,0.12);
+    border-radius: 16px;
+    padding: 2rem;
+    backdrop-filter: blur(12px);
+  }
+  .how-section h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    background: linear-gradient(90deg, #818cf8, #c084fc);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+  }
+  @media (max-width: 600px) {
+    .compare { grid-template-columns: 1fr; }
+  }
+  .compare-col h4 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(99,102,241,0.15);
+  }
+  .compare-col.trad h4 { color: #f87171; }
+  .compare-col.uring h4 { color: #818cf8; }
+  .compare-col code {
+    display: block;
+    background: rgba(0,0,0,0.4);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: #94a3b8;
+    white-space: pre;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  .compare-col code .kw { color: #c084fc; }
+  .compare-col code .fn { color: #818cf8; }
+  .compare-col code .cm { color: #475569; }
+  .compare-col code .hl { color: #34d399; }
+
+  /* Loading / error states */
+  .status {
+    text-align: center;
+    padding: 4rem;
+    color: #64748b;
+    font-size: 1.1rem;
+  }
+  .status.error { color: #f87171; }
+
+  .footer {
+    text-align: center;
+    padding: 2rem;
+    color: #475569;
+    font-size: 0.75rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="container" id="app">
+  <div class="header">
+    <h1>Redis AOF Benchmark</h1>
+    <p>Traditional <code>write()</code> + <code>fsync()</code>&ensp;vs&ensp;<code>io_uring</code> ring buffers</p>
+    <span class="tag">appendfsync = always</span>
+  </div>
+
+  <div id="content" class="status">Loading results.json …</div>
+</div>
+
+<script>
+const TRAD_COLOR  = 'rgba(248,113,113,0.85)';
+const URING_COLOR = 'rgba(129,140,248,0.85)';
+const TRAD_BG     = 'rgba(248,113,113,0.15)';
+const URING_BG    = 'rgba(129,140,248,0.15)';
+
+const chartDefaults = {
+  responsive: true,
+  plugins: {
+    legend: { labels: { color: '#94a3b8', font: { family: 'Inter', size: 12 } } },
+  },
+  scales: {
+    x: { ticks: { color: '#64748b', font: { size: 11 } }, grid: { color: 'rgba(99,102,241,0.06)' } },
+    y: { ticks: { color: '#64748b', font: { size: 11 } }, grid: { color: 'rgba(99,102,241,0.06)' } },
+  }
+};
+
+fetch('results.json')
+  .then(r => { if (!r.ok) throw new Error('Run the benchmark first: make run'); return r.json(); })
+  .then(render)
+  .catch(err => {
+    document.getElementById('content').className = 'status error';
+    document.getElementById('content').textContent = '⚠ ' + err.message;
+  });
+
+function render(data) {
+  const results = data.results;
+  const labels = results.map(r => r.label);
+
+  // Compute averages
+  const avgImprovement = results.reduce((s,r) => s + r.improvement_pct, 0) / results.length;
+  const avgTradOps = results.reduce((s,r) => s + r.traditional.ops_per_sec, 0) / results.length;
+  const avgUringOps = results.reduce((s,r) => s + r.iouring.ops_per_sec, 0) / results.length;
+
+  document.getElementById('content').innerHTML = `
+    <!-- Summary Cards -->
+    <div class="summary-grid">
+      <div class="card improvement">
+        <div class="label">Avg Improvement</div>
+        <div class="value">${avgImprovement >= 0 ? '+' : ''}${avgImprovement.toFixed(1)}%</div>
+        <div class="sub">io_uring over traditional</div>
+      </div>
+      <div class="card trad-card">
+        <div class="label">Traditional Avg</div>
+        <div class="value">${avgTradOps.toFixed(0)}</div>
+        <div class="sub">ops/sec (write + fsync)</div>
+      </div>
+      <div class="card uring-card">
+        <div class="label">io_uring Avg</div>
+        <div class="value">${avgUringOps.toFixed(0)}</div>
+        <div class="sub">ops/sec (batched SQEs)</div>
+      </div>
+      <div class="card">
+        <div class="label">Test Configs</div>
+        <div class="value" style="color:#22d3ee">${results.length}</div>
+        <div class="sub">benchmark runs</div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="chart-grid">
+      <div class="chart-box">
+        <h3>⚡ Throughput (ops/sec) — Higher is Better</h3>
+        <canvas id="opsChart"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>⏱ Avg Latency (μs/op) — Lower is Better</h3>
+        <canvas id="latChart"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>🕐 Total Time (ms) — Lower is Better</h3>
+        <canvas id="timeChart"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>📈 Improvement %</h3>
+        <canvas id="improvChart"></canvas>
+      </div>
+    </div>
+
+    <!-- How it works -->
+    <div class="how-section">
+      <h3>How It Works — Redis AOF I/O Path</h3>
+      <div class="compare">
+        <div class="compare-col trad">
+          <h4>❌ Traditional (Redis default)</h4>
+          <code><span class="cm">// for each Redis command:</span>
+<span class="kw">for</span> (i = 0; i < num_ops; i++) {
+    <span class="fn">write</span>(fd, buf, len);  <span class="cm">// syscall #1 ← blocks</span>
+    <span class="fn">fsync</span>(fd);            <span class="cm">// syscall #2 ← blocks</span>
+}
+<span class="cm">// 2 × context switches per op!</span></code>
+        </div>
+        <div class="compare-col uring">
+          <h4>✅ io_uring (our improvement)</h4>
+          <code><span class="cm">// batch operations into ring buffer:</span>
+<span class="kw">for</span> (i = 0; i < batch; i++) {
+    <span class="fn">io_uring_prep_write</span>(sqe, ...);
+    sqe->flags |= <span class="hl">IOSQE_IO_LINK</span>;
+    <span class="fn">io_uring_prep_fsync</span>(sqe, ...);
+}
+<span class="fn">io_uring_submit</span>(&ring); <span class="cm">// 1 syscall!</span></code>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Redis AOF io_uring Benchmark — Semester Mini Project
+    </div>
+  `;
+
+  // Ops/sec chart
+  new Chart(document.getElementById('opsChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Traditional', data: results.map(r => r.traditional.ops_per_sec), backgroundColor: TRAD_COLOR, borderRadius: 6 },
+        { label: 'io_uring',    data: results.map(r => r.iouring.ops_per_sec),     backgroundColor: URING_COLOR, borderRadius: 6 },
+      ]
+    },
+    options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, title: { display: false } } }
+  });
+
+  // Latency chart
+  new Chart(document.getElementById('latChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Traditional', data: results.map(r => r.traditional.avg_latency_us), backgroundColor: TRAD_COLOR, borderRadius: 6 },
+        { label: 'io_uring',    data: results.map(r => r.iouring.avg_latency_us),     backgroundColor: URING_COLOR, borderRadius: 6 },
+      ]
+    },
+    options: chartDefaults
+  });
+
+  // Total time chart
+  new Chart(document.getElementById('timeChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Traditional', data: results.map(r => r.traditional.total_time_ms), borderColor: TRAD_COLOR, backgroundColor: TRAD_BG, fill: true, tension: 0.3 },
+        { label: 'io_uring',    data: results.map(r => r.iouring.total_time_ms),     borderColor: URING_COLOR, backgroundColor: URING_BG, fill: true, tension: 0.3 },
+      ]
+    },
+    options: chartDefaults
+  });
+
+  // Improvement chart
+  new Chart(document.getElementById('improvChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Improvement %',
+        data: results.map(r => r.improvement_pct),
+        backgroundColor: results.map(r => r.improvement_pct >= 0 ? 'rgba(52,211,153,0.8)' : 'rgba(248,113,113,0.8)'),
+        borderRadius: 6,
+      }]
+    },
+    options: chartDefaults
+  });
+}
+</script>
+</body>
+</html>
